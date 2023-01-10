@@ -13,16 +13,6 @@ select distinct AUD_INS_DT,  cast(AUD_INS_DT as date) as fecha
      order by fecha desc;
 
 
-create or replace table meli-bi-data.SBOX_CREDITS_SB.Base_Analisis_DE as 
-select 
-    A.*
-    except (EMAIL,CUS_PHONE)  /*CAMPOS CON INFO SENSIBLE*/
-    from meli-bi-data.SBOX_IT_CREDITS_CREDITSTBL.MC_JARVIS_HIST as a 
-    inner join  meli-bi-data.SBOX_CREDITS_SB.fechas_encendidos as b on
-    a.AUD_INS_DT = b.AUD_INS_DT 
-    where tipo_loggeo="ENCENDIDO"  AND SIT_SITE_ID="MLM" and flag_de = 1;
-
-
 select 
     a.CUS_CUST_ID_SEL,
     avg(a.weekly_tpv_lc),
