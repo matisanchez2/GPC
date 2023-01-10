@@ -1,0 +1,59 @@
+--- TODO: Dejar una fecha por mes 
+----  CALCULAR CV por customer
+---- dejar sólo los que se prendieron 
+--- Armar las marcas que me dijo mery 
+-- Segunda Métria, cuantas veces predice el salario del próximo mes. 
+-- terce métrica, ponderar por  la anterior por monto prestado y probabilidad de prestar? 
+
+create or replace table meli-bi-data.SBOX_CREDITS_SB.fechas_encendidos as 
+select distinct AUD_INS_DT,  cast(AUD_INS_DT as date) as fecha
+    from `meli-bi-data.SBOX_IT_CREDITS_CREDITSTBL.MC_JARVIS_HIST` 
+     where tipo_loggeo="ENCENDIDO"  AND SIT_SITE_ID="MLM" and flag_de = 1 and
+     cast(AUD_INS_DT as date) > DATE_SUB(current_date() , INTERVAL 4 MONTH)
+     order by fecha desc;
+
+
+create or replace table meli-bi-data.SBOX_CREDITS_SB.Base_Analisis_DE as 
+select 
+    A.*
+    except (EMAIL,CUS_PHONE)  /*CAMPOS CON INFO SENSIBLE*/
+    from meli-bi-data.SBOX_IT_CREDITS_CREDITSTBL.MC_JARVIS_HIST as a 
+    inner join  meli-bi-data.SBOX_CREDITS_SB.fechas_encendidos as b on
+    a.AUD_INS_DT = b.AUD_INS_DT 
+    where tipo_loggeo="ENCENDIDO"  AND SIT_SITE_ID="MLM" and flag_de = 1;
+
+
+select 
+    a.CUS_CUST_ID_SEL,
+    avg(a.weekly_tpv_lc),
+    STDDEV_POP(a.weekly_tpv_lc)
+    from meli-bi-data.SBOX_IT_CREDITS_CREDITSTBL.Base_Analisis_DE  as a 
+    inner join fechas_encendidos as b on
+    a.AUD_INS_DT = b.AUD_INS_DT 
+    where a.tipo_loggeo="ENCENDIDO"  AND a.SIT_SITE_ID="MLM" and a.flag_de = 1
+    group by a.cus_cust_id_sel;
+
+
+
+
+
+
+---- Devuelve  los Periodos dónde se encendio
+select  
+    sit_site_id,
+    cus_cust_id_sel,
+    case when aprobacion_de in ('aprobable','aprobable yellow','con oferta merchants vigente') then 1
+        else 0 end as linea_on_abril,
+    max_amount_de as max_amount_de_abril ,
+    rating_churn,
+    tag_producto,
+    tag_oferta_de,
+    weekly_tpv_lc as weekly_tpv_lc_abril,
+    monthly_tpv_lc as monthly_tpv_lc_abril,
+    tag_tipo_borrower_de as tag_tipo_borrower_de_abril,
+    aprobacion_de as aprobacion_de_abril
+from meli-bi-data.SBOX_IT_CREDITS_CREDITSTBL.MC_JARVIS
+where sit_site_id in ("MLM")
+limit 1;
+
+

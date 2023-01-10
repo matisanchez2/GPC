@@ -1,0 +1,15 @@
+--- Te indica si la persona está aprobable para Dinero Express, 
+-- y si no la razón 
+select  APROBACION_DE, count(*) as cantidad from meli-bi-data.SBOX_IT_CREDITS_CREDITSTBL.MC_JARVIS
+GROUP BY
+    aprobacion_de
+ORDER BY
+    cantidad desc ;
+
+SELECT sit_site_id,  count(*) AS CANTIDAD  FROM `meli-bi-data.SBOX_IT_CREDITS_CREDITSTBL.MC_JARVIS`
+  GROUP BY  sit_site_id 
+  ORDER BY  CANTIDAD desc;
+
+SELECT sit_site_id, TAG_TPV_SEGMENT_M1, count(*) AS CANTIDAD  FROM `meli-bi-data.SBOX_IT_CREDITS_CREDITSTBL.MC_JARVIS`
+  GROUP BY  sit_site_id, TAG_TPV_SEGMENT_M1
+  ORDER BY sit_site_id ,  CANTIDAD desc;

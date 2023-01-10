@@ -1,0 +1,3 @@
+select max(PAY_CREATED_DT) as max_fecha, 
+      min(PAY_CREATED_DT) AS min_fecha
+ from meli-bi-data.SBOX_CREDITS_SB.PaymentsDE;

@@ -1,0 +1,27 @@
+------------------------------------------------
+--------------- Funciones Creadas -------------
+------------------------------------------------
+
+-- Muestra Fechas de Encendido
+CALL `meli-bi-data.SBOX_CREDITS_SB.func_fechas_encendidos`(NULL);
+
+
+
+
+
+
+------------------------------------------------
+--------------- Implementaciones ---------------
+------------------------------------------------
+
+--- Mostrar Todas las fechas de Encendido
+CREATE or replace PROCEDURE `meli-bi-data.SBOX_CREDITS_SB.func_fechas_encendidos`(fecha_limite DATE) 
+BEGIN
+    declare fecha_limites date; 
+    set fecha_limites =  COALESCE(fecha_limite, '2010-01-01');
+       select distinct AUD_INS_DT,  cast(AUD_INS_DT as date) as fecha
+       from `meli-bi-data.SBOX_IT_CREDITS_CREDITSTBL.MC_JARVIS_HIST` 
+        where tipo_loggeo="ENCENDIDO"  AND SIT_SITE_ID="MLM" and flag_de = 1
+        and cast(AUD_INS_DT as date) >fecha_limite 
+       order by fecha desc;
+END;
