@@ -11,5 +11,14 @@ SELECT sit_site_id,  count(*) AS CANTIDAD  FROM `meli-bi-data.SBOX_IT_CREDITS_CR
   ORDER BY  CANTIDAD desc;
 
 SELECT sit_site_id, TAG_TPV_SEGMENT_M1, count(*) AS CANTIDAD  FROM `meli-bi-data.SBOX_IT_CREDITS_CREDITSTBL.MC_JARVIS`
-  GROUP BY  sit_site_id, TAG_TPV_SEGMENT_M1
+  GROUP BY  sfit_site_id, TAG_TPV_SEGMENT_M1
   ORDER BY sit_site_id ,  CANTIDAD desc;
+
+
+
+
+
+
+select * from meli-bi-data.SBOX_CREDITS_SB.mc_cred
+
+

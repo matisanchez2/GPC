@@ -1,0 +1,825 @@
+BEGIN
+  CREATE TEMPORARY TABLE parametros_vol AS
+SELECT
+  23 AS days,
+  15 AS days_proy;
+END;
+
+BEGIN
+  CREATE TEMPORARY TABLE TABLA_PUNIT_1 AS
+SELECT
+  CRD_INST_ID,
+  MAX(CASE
+      WHEN (CRD_INST_LATE_FEE_CONCEPT = 'PUNITIVE_FEE') THEN CRD_INST_LATE_FEE_AMOUNT
+    ELSE
+    NULL
+  END
+    ) CRD_INST_PUNITIVE_FEE_AMT,
+  MAX(CASE
+      WHEN (CRD_INST_LATE_FEE_CONCEPT = 'COMPENSATORY_FEE') THEN CRD_INST_LATE_FEE_AMOUNT
+    ELSE
+    NULL
+  END
+    ) CRD_INST_COMPENSATORY_FEE_AMT,
+  MAX(CASE
+      WHEN (CRD_INST_LATE_FEE_CONCEPT = 'PENALTY_FEE') THEN CRD_INST_LATE_FEE_AMOUNT
+    ELSE
+    NULL
+  END
+    ) CRD_INST_PENALTY_FEE_AMT
+FROM (
+  SELECT
+    CRD_INST_LATEt_FEE_ID,
+    CRD_INST_ID,
+    CRD_INST_LATe_FEE_CONCEPT,
+    CRD_INST_LATE_FEE_AMOUNT
+  FROM
+    `meli-bi-data.WHOWNER.BT_CRD_INST_LATE_FEE` QUALIFY ROW_NUMBER() OVER (PARTITION BY CRD_INST_ID, CRD_INST_LATE_FEE_CONCEPT ORDER BY crd_inst_late_fee_last_upd DESC) = 1) a
+GROUP BY
+  1 ;
+END
+  ;
+  
+/*******************************
+  TABLA DE INTERESES PUNITORIOS
+*******************************/
+BEGIN
+  CREATE TEMPORARY TABLE punitorios
+CLUSTER BY
+  sit_site_id AS
+SELECT
+  c.crd_product_id,
+  CASE
+    WHEN UPPER(c.crd_product_id) IN( 'EXPRESS_MLB_1', 'EXPRESS_POINT_MLB_1', 'BABY_EXPRESS_POINT_MLB_1' ) THEN 'MLB'
+    WHEN UPPER(c.crd_product_id) IN( 'EXPRESS_MONEY_MLA_1',
+    'EXPRESS_POINT_MLA_1',
+    'BABY_EXPRESS_POINT_MLA_1' ) THEN 'MLA'
+    WHEN UPPER(c.crd_product_id) IN( 'EXPRESS_MONEY_MLM_1', 'EXPRESS_POINT_MLM_1', 'BABY_EXPRESS_POINT_MLM_1' ) THEN 'MLM'
+  ELSE
+  'ERROR'
+END
+  AS sit_site_id,
+  a.crd_inst_id,
+  CASE
+    WHEN UPPER(b.crd_late_fee_system_id) = 'DEFAULT_NO_CHARGE' THEN CAST(0 AS BIGNUMERIC)
+  ELSE
+  COALESCE(a.crd_inst_punitive_fee_amt, NUMERIC '0') + COALESCE(a.crd_inst_compensatory_fee_amt, NUMERIC '0') + COALESCE(a.crd_inst_penalty_fee_amt, NUMERIC '0')
+END
+  AS late_fee_amount
+FROM
+  TABLA_PUNIT_1 AS a
+LEFT OUTER JOIN
+  `meli-bi-data.WHOWNER.BT_MP_CREDITS_INSTALLMENT` AS b
+ON
+  a.crd_inst_id = b.crd_inst_id
+LEFT OUTER JOIN
+  `meli-bi-data.WHOWNER.BT_MP_CREDITS_CREDIT_DETAIL` AS c
+ON
+  b.crd_credit_id = c.crd_credit_id
+WHERE
+  UPPER(c.crd_product_id) IN( 'EXPRESS_MLB_1',
+    'EXPRESS_MONEY_MLA_1',
+    'EXPRESS_MONEY_MLM_1',
+    'EXPRESS_POINT_MLA_1',
+    'EXPRESS_POINT_MLB_1',
+    'EXPRESS_POINT_MLM_1',
+    'BABY_EXPRESS_POINT_MLA_1',
+    'BABY_EXPRESS_POINT_MLB_1',
+    'BABY_EXPRESS_POINT_MLM_1' ) ;
+END
+  ;
+BEGIN
+  CREATE TEMPORARY TABLE PLAZO AS
+SELECT
+  a.crd_credit_id,
+  CASE
+    WHEN DATE_DIFF(b.crd_inst_due_date_id, a.crd_credit_creation_date_id, DAY) < 8 THEN 7
+    WHEN DATE_DIFF(b.crd_inst_due_date_id, a.crd_credit_creation_date_id, DAY) < 15 THEN 14
+    WHEN DATE_DIFF(b.crd_inst_due_date_id, a.crd_credit_creation_date_id, DAY) < 22 THEN 21
+    WHEN DATE_DIFF(b.crd_inst_due_date_id, a.crd_credit_creation_date_id, DAY) < 29 THEN 28
+  ELSE
+  CAST(NULL AS INT64)
+END
+  AS plazo
+FROM
+  `meli-bi-data.WHOWNER.BT_MP_CREDITS_CREDIT_DETAIL` AS a
+LEFT OUTER JOIN
+  `meli-bi-data.WHOWNER.BT_MP_CREDITS_INSTALLMENT` AS b
+ON
+  a.crd_credit_id = b.crd_credit_id;
+END
+  ;
+BEGIN
+  CREATE TEMPORARY TABLE DEBT_BALANCE AS
+SELECT
+  A.crd_credit_id,
+  SUM(CASE
+      WHEN B.CRD_INST_STATUS_ID NOT IN ('PAID_EARLY', 'PAID') AND B.CRD_INST_PAYMENT_DT_ID IS NULL THEN B.CRD_INST_AMORTIZATION_AMOUNT
+    ELSE
+    0
+  END
+    ) AS DEBT_BALANCE
+FROM
+  `meli-bi-data.WHOWNER.BT_MP_CREDITS_CREDIT_DETAIL` AS a
+LEFT OUTER JOIN
+  `meli-bi-data.WHOWNER.BT_MP_CREDITS_INSTALLMENT` AS b
+ON
+  a.crd_credit_id = b.crd_credit_id
+LEFT OUTER JOIN
+  punitorios AS c
+ON
+  b.crd_inst_id = c.crd_inst_id
+LEFT OUTER JOIN
+  PLAZO AS D
+ON
+  a.crd_credit_id = D.crd_credit_id
+CROSS JOIN
+  parametros_vol
+GROUP BY
+  1;
+END
+  ; /*****************************************************************************
+  ARMAMOS BASE DE CREDITOS POR PRODUCTO DINERO EXPRESS CON INFO DE ARRIBA
+******************************************************************************/
+  --DROP TABLE dinero_express_analisis_1;
+BEGIN
+  CREATE TEMPORARY TABLE dinero_express_analisis_1 AS
+SELECT
+  a.sit_site_id,
+  a.crd_prop_creation_date_id,
+  a.crd_credit_creation_date_id,
+  a.crd_prop_total_amount_at_creation AS crd_prop_total_amount,
+  a.cus_cust_id_borrower,
+  a.crd_credit_id,
+  a.crd_product_id,
+  CASE
+    WHEN a.crd_credit_status_id IN( 'DEFAULTED', 'REFINANCED' ) OR b.crd_inst_status_id IN( 'IN_REPAYMENT', 'DEFAULTED' ) THEN DATE_DIFF(CURRENT_DATE(), b.crd_inst_due_date_id, DAY)
+  ELSE
+  0
+END
+  AS qty_days_overdue,
+  EXTRACT(YEAR
+  FROM
+    CAST(a.crd_credit_creation_date_id AS TIMESTAMP)) * 100 + EXTRACT(MONTH
+  FROM
+    CAST(a.crd_credit_creation_date_id AS TIMESTAMP)) AS mes_orig,
+  EXTRACT(DAY
+  FROM
+    CAST(a.crd_credit_creation_date_id AS TIMESTAMP)) AS dia_orig,
+  CASE
+    WHEN EXTRACT(DAY FROM CAST(a.crd_credit_creation_date_id AS TIMESTAMP)) <= 7 THEN 1
+    WHEN EXTRACT(DAY
+  FROM
+    CAST(a.crd_credit_creation_date_id AS TIMESTAMP)) <= 14 THEN 2
+    WHEN EXTRACT(DAY FROM CAST(a.crd_credit_creation_date_id AS TIMESTAMP)) <= 21 THEN 3
+  ELSE
+  4
+END
+  AS semana_orig,
+  a.crd_credit_amount,
+  a.crd_credit_tna AS tna,
+  a.user_type_at_crd_creation AS tipo_borrower,
+  a.crd_risk_analysis_rating_id AS rating,
+  CASE
+    WHEN UPPER(a.crd_product_id) IN( 'EXPRESS_POINT_MLB_1', 'BABY_EXPRESS_POINT_MLB_1', 'EXPRESS_POINT_MLA_1', 'BABY_EXPRESS_POINT_MLA_1', 'EXPRESS_POINT_MLM_1', 'BABY_EXPRESS_POINT_MLM_1' ) THEN CAST(1 AS STRING)
+    WHEN UPPER(a.crd_product_id) IN( 'EXPRESS_MLB_1',
+    'EXPRESS_MONEY_MLA_1',
+    'EXPRESS_MONEY_MLM_1' ) THEN CAST(0 AS STRING)
+  ELSE
+  'ERROR'
+END
+  AS flag_instore,
+  CASE
+    WHEN UPPER(c.crd_product_id) IN( 'BABY_EXPRESS_POINT_MLB_1', 'BABY_EXPRESS_POINT_MLA_1', 'BABY_EXPRESS_POINT_MLM_1' ) THEN 1
+  ELSE
+  0
+END
+  AS flag_baby_de,
+  D.PLAZO,
+  b.crd_inst_due_date_id AS fecha_vencimiento,
+  CASE
+    WHEN b.crd_inst_payment_dt_id IS NULL THEN CURRENT_DATE()
+  ELSE
+  b.crd_inst_payment_dt_id
+END
+  AS fecha_pago,
+  CASE
+    WHEN DATE_DIFF(CASE
+      WHEN b.crd_inst_payment_dt_id IS NULL THEN CURRENT_DATE()
+    ELSE
+    b.crd_inst_payment_dt_id
+  END
+    , b.crd_inst_due_date_id, DAY) > parametros_vol.days THEN 1
+  ELSE
+  0
+END
+  AS flag_fpd,
+  CASE
+    WHEN DATE_DIFF(CASE
+      WHEN b.crd_inst_payment_dt_id IS NULL THEN CURRENT_DATE()
+    ELSE
+    b.crd_inst_payment_dt_id
+  END
+    , b.crd_inst_due_date_id, DAY) > parametros_vol.days THEN a.crd_credit_amount
+  ELSE
+  0
+END
+  AS fpd_amount,
+  CASE
+    WHEN DATE_DIFF(CASE
+      WHEN b.crd_inst_payment_dt_id IS NULL THEN CURRENT_DATE()
+    ELSE
+    b.crd_inst_payment_dt_id
+  END
+    , b.crd_inst_due_date_id, DAY) > parametros_vol.days_proy THEN 1
+  ELSE
+  0
+END
+  AS flag_fpd_proy,
+  CASE
+    WHEN DATE_DIFF(CASE
+      WHEN b.crd_inst_payment_dt_id IS NULL THEN CURRENT_DATE()
+    ELSE
+    b.crd_inst_payment_dt_id
+  END
+    , b.crd_inst_due_date_id, DAY) > parametros_vol.days_proy THEN a.crd_credit_amount
+  ELSE
+  0
+END
+  AS fpd_amount_proy,
+  CASE
+    WHEN CASE
+    WHEN DATE_DIFF(CASE
+      WHEN b.crd_inst_payment_dt_id IS NULL THEN CURRENT_DATE()
+    ELSE
+    b.crd_inst_payment_dt_id
+  END
+    , b.crd_inst_due_date_id, DAY) > parametros_vol.days THEN 1
+  ELSE
+  0
+END
+  = 0 THEN b.crd_inst_interest_amount + COALESCE(c.late_fee_amount, NUMERIC '0')
+  ELSE
+  CAST(0 AS BIGNUMERIC)
+END
+  AS crd_credit_revenues,
+  CASE
+    WHEN CASE
+    WHEN DATE_DIFF(CASE
+      WHEN b.crd_inst_payment_dt_id IS NULL THEN CURRENT_DATE()
+    ELSE
+    b.crd_inst_payment_dt_id
+  END
+    , b.crd_inst_due_date_id, DAY) > parametros_vol.days THEN 1
+  ELSE
+  0
+END
+  = 0 THEN b.crd_inst_interest_amount
+  ELSE
+  0
+END
+  AS intereses,
+  CASE
+    WHEN CASE
+    WHEN DATE_DIFF(CASE
+      WHEN b.crd_inst_payment_dt_id IS NULL THEN CURRENT_DATE()
+    ELSE
+    b.crd_inst_payment_dt_id
+  END
+    , b.crd_inst_due_date_id, DAY) > parametros_vol.days THEN 1
+  ELSE
+  0
+END
+  = 0 THEN COALESCE(c.late_fee_amount, NUMERIC '0')
+  ELSE
+  CAST(0 AS BIGNUMERIC)
+END
+  AS punitorios,
+  CASE
+    WHEN CASE
+    WHEN DATE_DIFF(CASE
+      WHEN b.crd_inst_payment_dt_id IS NULL THEN CURRENT_DATE()
+    ELSE
+    b.crd_inst_payment_dt_id
+  END
+    , b.crd_inst_due_date_id, DAY) > parametros_vol.days_proy THEN 1
+  ELSE
+  0
+END
+  = 0 THEN b.crd_inst_interest_amount + COALESCE(c.late_fee_amount, NUMERIC '0')
+  ELSE
+  CAST(0 AS BIGNUMERIC)
+END
+  AS crd_credit_revenues_proy,
+  CASE
+    WHEN CASE
+    WHEN CASE
+    WHEN a.crd_credit_status_id IN( 'DEFAULTED', 'REFINANCED') OR b.crd_inst_status_id IN('IN_REPAYMENT', 'DEFAULTED') THEN DATE_DIFF(CURRENT_DATE(), b.crd_inst_due_date_id, DAY)
+  ELSE
+  0
+END
+  > parametros_vol.days THEN 1
+  ELSE
+  0
+END
+  = 0 THEN b.crd_inst_interest_amount + COALESCE(c.late_fee_amount, NUMERIC '0')
+  ELSE
+  CAST(0 AS BIGNUMERIC)
+END
+  AS crd_credit_hoy_revenues,
+  CASE
+    WHEN CASE
+    WHEN CASE
+    WHEN a.crd_credit_status_id IN( 'DEFAULTED', 'REFINANCED' ) OR b.crd_inst_status_id IN( 'IN_REPAYMENT', 'DEFAULTED' ) THEN DATE_DIFF(CURRENT_DATE(), b.crd_inst_due_date_id, DAY)
+  ELSE
+  0
+END
+  > parametros_vol.days THEN 1
+  ELSE
+  0
+END
+  = 0 THEN b.crd_inst_interest_amount
+  ELSE
+  0
+END
+  AS intereses_hoy,
+  CASE
+    WHEN CASE
+    WHEN CASE
+    WHEN a.crd_credit_status_id IN( 'DEFAULTED', 'REFINANCED' ) OR b.crd_inst_status_id IN( 'IN_REPAYMENT', 'DEFAULTED' ) THEN DATE_DIFF(CURRENT_DATE(), b.crd_inst_due_date_id, DAY)
+  ELSE
+  0
+END
+  > parametros_vol.days THEN 1
+  ELSE
+  0
+END
+  = 0 THEN COALESCE(c.late_fee_amount, NUMERIC '0')
+  ELSE
+  CAST(0 AS BIGNUMERIC)
+END
+  AS punitorios_hoy,
+  CASE
+    WHEN CASE
+    WHEN a.crd_credit_status_id IN( 'DEFAULTED',
+    'REFINANCED' )
+  OR b.crd_inst_status_id IN( 'IN_REPAYMENT',
+    'DEFAULTED' ) THEN DATE_DIFF(CURRENT_DATE(), b.crd_inst_due_date_id, DAY)
+  ELSE
+  0
+END
+  > parametros_vol.days THEN 1
+  ELSE
+  0
+END
+  AS flag_default_hoy,
+  CASE
+    WHEN CASE
+    WHEN CASE
+    WHEN a.crd_credit_status_id IN( 'DEFAULTED', 'REFINANCED' ) OR b.crd_inst_status_id IN( 'IN_REPAYMENT', 'DEFAULTED' ) THEN DATE_DIFF(CURRENT_DATE(), b.crd_inst_due_date_id, DAY)
+  ELSE
+  0
+END
+  > parametros_vol.days THEN 1
+  ELSE
+  0
+END
+  = 0 THEN DATE_DIFF(CASE
+      WHEN b.crd_inst_payment_dt_id IS NULL THEN CURRENT_DATE()
+    ELSE
+    b.crd_inst_payment_dt_id
+  END
+    , b.crd_inst_due_date_id, DAY)
+  ELSE
+  0
+END
+  AS dias_atraso,
+  /*CASE WHEN b.crd_inst_status_id IN('PAID_EARLY', 'PAID') THEN 1
+ WHEN cast(a.crd_credit_creation_date_id as date) < (current_date() - d.plazo - parametros_vol.days) THEN 1 ELSE 0 END AS flag_comportamiento_pago,*/
+  CASE
+    WHEN CAST(a.crd_credit_creation_date_id AS date) < (CURRENT_DATE() - d.plazo - parametros_vol.days) THEN 1
+  ELSE
+  0
+END
+  AS FLAG_COMPORTAMIENTO_PAGO,
+  /*CASE WHEN B.CRD_INST_STATUS_ID IN ('PAID_EARLY', 'PAID') THEN 1 WHEN A.CRD_CREDIT_CREATION_DATE_ID < CURRENT_DATE() - d.PLAZO - PARAMETROS_VOL.DAYS_PROY THEN 1 ELSE 0 END AS FLAG_COMPORTAMIENTO_PAGO_PROY,*/
+  CASE
+    WHEN A.CRD_CREDIT_CREATION_DATE_ID < CURRENT_DATE() - d.PLAZO - PARAMETROS_VOL.DAYS_PROY THEN 1
+  ELSE
+  0
+END
+  AS FLAG_COMPORTAMIENTO_PAGO_PROY,
+  E.DEBT_BALANCE,
+  CASE
+    WHEN (CASE
+      WHEN a.crd_credit_status_id IN('DEFAULTED',
+      'REFINANCED')
+    OR b.crd_inst_status_id IN('IN_REPAYMENT',
+      'DEFAULTED') THEN DATE_DIFF(CURRENT_DATE(), b.crd_inst_due_date_id, DAY)
+    ELSE
+    0
+  END
+    ) > parametros_vol.days THEN E.DEBT_BALANCE
+  ELSE
+  0
+END
+  AS default_hoy_amount
+FROM
+  `meli-bi-data.WHOWNER.BT_MP_CREDITS_CREDIT_DETAIL` AS a
+LEFT OUTER JOIN
+  `meli-bi-data.WHOWNER.BT_MP_CREDITS_INSTALLMENT` AS b
+ON
+  a.crd_credit_id = b.crd_credit_id
+LEFT OUTER JOIN
+  punitorios AS c
+ON
+  b.crd_inst_id = c.crd_inst_id
+LEFT OUTER JOIN
+  PLAZO AS D
+ON
+  a.crd_credit_id = D.crd_credit_id
+LEFT OUTER JOIN
+  DEBT_BALANCE AS E
+ON
+  a.crd_credit_id = E.crd_credit_id
+CROSS JOIN
+  parametros_vol
+WHERE
+  1 = 1
+  AND UPPER(a.crd_product_id) IN( 'EXPRESS_MONEY_MLA_1',
+    'EXPRESS_POINT_MLA_1',
+    'EXPRESS_MONEY_MLM_1',
+    'EXPRESS_POINT_MLM_1',
+    'EXPRESS_MLB_1',
+    'EXPRESS_POINT_MLB_1',
+    'BABY_EXPRESS_POINT_MLA_1',
+    'BABY_EXPRESS_POINT_MLB_1',
+    'BABY_EXPRESS_POINT_MLM_1' )
+  AND a.crd_credit_status_id NOT IN('CANCELLED',
+    'ANNULLED' )
+  AND a.crd_credit_id NOT IN(5318566,
+    4848188)
+  AND PLAZO IS NOT NULL
+  --GROUP BY 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34
+  ;
+END
+  ;
+  ---DROP TABLE dinero_express_analisis_1_FINAL;
+BEGIN
+  CREATE TEMPORARY TABLE dinero_express_analisis_1_FINAL AS
+SELECT
+  a.*,
+  CASE
+    WHEN flag_instore = '0' AND mes_orig = 202204 THEN COALESCE(a.crd_credit_amount, NUMERIC '0') * NUMERIC '0.09' / 360 * plazo
+    WHEN flag_instore = '0' AND mes_orig = 202205 THEN COALESCE(a.crd_credit_amount, NUMERIC '0') * NUMERIC '0.09' / 360 * plazo
+    WHEN flag_instore = '0' AND mes_orig = 202206 THEN COALESCE(a.crd_credit_amount, NUMERIC '0') * NUMERIC '0.09' / 360 * plazo
+    WHEN flag_instore = '0' AND mes_orig = 202207 THEN COALESCE(a.crd_credit_amount, NUMERIC '0') * NUMERIC '0.10' / 360 * plazo
+    WHEN flag_instore = '0' AND mes_orig = 202208 THEN COALESCE(a.crd_credit_amount, NUMERIC '0') * NUMERIC '0.15' / 360 * plazo
+    WHEN flag_instore = '0' AND mes_orig = 202209 THEN COALESCE(a.crd_credit_amount, NUMERIC '0') * NUMERIC '0.12' / 360 * plazo--ACTUALZIAR!
+
+    WHEN flag_instore = '1' AND mes_orig = 202204 THEN COALESCE(a.crd_credit_amount, NUMERIC '0') * NUMERIC '0.09' / 360 * plazo
+    WHEN flag_instore = '1' AND mes_orig = 202205 THEN COALESCE(a.crd_credit_amount, NUMERIC '0') * NUMERIC '0.09' / 360 * plazo
+    WHEN flag_instore = '1' AND mes_orig = 202206 THEN COALESCE(a.crd_credit_amount, NUMERIC '0') * NUMERIC '0.09' / 360 * plazo
+    WHEN flag_instore = '1' AND mes_orig = 202207 THEN COALESCE(a.crd_credit_amount, NUMERIC '0') * NUMERIC '0.10' / 360 * plazo
+    WHEN flag_instore = '1' AND mes_orig = 202208 THEN COALESCE(a.crd_credit_amount, NUMERIC '0') * NUMERIC '0.10' / 360 * plazo
+    WHEN flag_instore = '1' AND mes_orig = 202209 THEN COALESCE(a.crd_credit_amount, NUMERIC '0') * NUMERIC '0.11' / 360 * plazo--ACTUALZIAR!
+  ELSE CAST(0 AS NUMERIC) END AS funding_cost,
+
+  CASE
+    WHEN flag_instore = '0' AND mes_orig = 202204 THEN COALESCE(a.crd_credit_amount, NUMERIC '0') * NUMERIC '0.04' / 360 * plazo
+    WHEN flag_instore = '0' AND mes_orig = 202205 THEN COALESCE(a.crd_credit_amount, NUMERIC '0') * NUMERIC '0.02' / 360 * plazo
+    WHEN flag_instore = '0' AND mes_orig = 202206 THEN COALESCE(a.crd_credit_amount, NUMERIC '0') * NUMERIC '0.04' / 360 * plazo
+    WHEN flag_instore = '0' AND mes_orig = 202207 THEN COALESCE(a.crd_credit_amount, NUMERIC '0') * NUMERIC '0.03' / 360 * plazo
+    WHEN flag_instore = '0' AND mes_orig = 202208 THEN COALESCE(a.crd_credit_amount, NUMERIC '0') * NUMERIC '0.03' / 360 * plazo
+    WHEN flag_instore = '0' AND mes_orig = 202209 THEN COALESCE(a.crd_credit_amount, NUMERIC '0') * NUMERIC '0.03' / 360 * plazo--ACTUALIZAR
+
+    WHEN flag_instore = '1' AND mes_orig = 202204 THEN COALESCE(a.crd_credit_amount, NUMERIC '0') * NUMERIC '0.07' / 360 * plazo
+    WHEN flag_instore = '1' AND mes_orig = 202205 THEN COALESCE(a.crd_credit_amount, NUMERIC '0') * NUMERIC '0.05' / 360 * plazo
+    WHEN flag_instore = '1' AND mes_orig = 202206 THEN COALESCE(a.crd_credit_amount, NUMERIC '0') * NUMERIC '0.07' / 360 * plazo
+    WHEN flag_instore = '1' AND mes_orig = 202207 THEN COALESCE(a.crd_credit_amount, NUMERIC '0') * NUMERIC '0.05' / 360 * plazo
+    WHEN flag_instore = '1' AND mes_orig = 202208 THEN COALESCE(a.crd_credit_amount, NUMERIC '0') * NUMERIC '0.05' / 360 * plazo
+    WHEN flag_instore = '1' AND mes_orig = 202209 THEN COALESCE(a.crd_credit_amount, NUMERIC '0') * NUMERIC '0.04' / 360 * plazo--ACTUALIZAR
+  ELSE  CAST(0 AS NUMERIC) END  AS other_cogs
+  
+FROM
+  dinero_express_analisis_1 a ;
+END
+  ;
+  --drop table propuestas_cuota_fija;
+BEGIN
+  CREATE TEMPORARY TABLE propuestas_cuota_fija AS
+SELECT
+  a.sit_site_id,
+  b.cus_cust_id_borrower,
+  b.crd_credit_id,
+  MAX(a.crd_prop_id) AS crd_prop_id
+FROM
+  `meli-bi-data.SBOX_IT_CREDITS_CREDITSTBL.BASE_MC_CRED` AS a
+INNER JOIN
+  dinero_express_analisis_1_FINAL AS b
+ON
+  a.cus_cust_id_borrower = b.cus_cust_id_borrower
+  AND UPPER(a.product_type) = 'CREDITO_CUOTA_FIJA'
+  AND a.crd_prop_creation_date_id <= b.crd_prop_creation_date_id
+  AND a.crd_prop_expir_date_id > b.crd_prop_creation_date_id
+GROUP BY
+  1,
+  2,
+  3 ;
+END
+  ;
+  --drop table creditos_cuota_fija;
+BEGIN
+  CREATE TEMPORARY TABLE creditos_cuota_fija AS
+SELECT
+  a.sit_site_id,
+  a.cus_cust_id_borrower,
+  a.crd_credit_id,
+  MAX(b.crd_prop_id) AS crd_prop_id
+FROM
+  dinero_express_analisis_1_FINAL AS a
+INNER JOIN
+  `meli-bi-data.SBOX_IT_CREDITS_CREDITSTBL.BASE_MC_CRED` AS b
+ON
+  a.cus_cust_id_borrower = b.cus_cust_id_borrower
+  AND b.flag_adopted_proposal = 1
+  AND UPPER(b.product_type) = 'CREDITO_CUOTA_FIJA'
+  AND b.crd_credit_creation_date_id < a.crd_prop_creation_date_id
+  AND (b.crd_credit_finish_date_id >= a.crd_prop_creation_date_id
+    OR b.crd_credit_finish_date_id IS NULL)
+GROUP BY
+  1,
+  2,
+  3 ;
+END
+  ;
+BEGIN
+
+  -- drop table VINTAGE_DE_MODIFIED;
+  CREATE TEMPORARY TABLE vintage_de_modified AS
+SELECT
+  a.sit_site_id,
+  a.crd_prop_creation_date_id,
+  a.crd_credit_creation_date_id,
+  a.cus_cust_id_borrower,
+  a.crd_credit_id,
+  a.crd_product_id,
+  a.flag_baby_de,
+  a.mes_orig,
+  a.dia_orig,
+  a.semana_orig,
+  a.crd_credit_amount,
+  a.tna,
+  a.tipo_borrower,
+  a.rating,
+  CASE
+    WHEN b.crd_credit_id IS NULL THEN 0
+  ELSE
+  1
+END
+  AS flag_prop_cuota_fija,
+  CASE
+    WHEN c.crd_credit_id IS NULL THEN 0
+  ELSE
+  1
+END
+  AS flag_cred_cuota_fija,
+  a.crd_credit_revenues,
+  a.crd_credit_revenues_proy,
+  a.crd_credit_hoy_revenues,
+  a.intereses,
+  a.punitorios,
+  a.intereses_hoy,
+  a.punitorios_hoy,
+  a.dias_atraso,
+  a.flag_fpd,
+  a.fpd_amount,
+  a.flag_fpd_proy,
+  a.fpd_amount_proy,
+  a.flag_default_hoy,
+  a.default_hoy_amount,
+  a.flag_instore,
+  a.flag_comportamiento_pago,
+  a.flag_comportamiento_pago_proy,
+  a.funding_cost,
+  a.other_cogs,
+  a.plazo
+FROM
+  dinero_express_analisis_1_FINAL AS a
+LEFT OUTER JOIN
+  propuestas_cuota_fija AS b
+ON
+  a.crd_credit_id = b.crd_credit_id
+LEFT OUTER JOIN
+  creditos_cuota_fija AS c
+ON
+  a.crd_credit_id = c.crd_credit_id ;
+END
+  ;
+
+
+/*********************************
+  SALIDA VINTAGE DE: INSTORE
+*********************************/
+DROP TABLE IF EXISTS SBOX_CREDITS_SB.VISTA_VINTAGE_DE_MLM_INSTORE;
+ CREATE TABLE SBOX_CREDITS_SB.VISTA_VINTAGE_DE_MLM_INSTORE AS 
+SELECT
+  MES_ORIG,
+  CASE WHEN FLAG_INSTORE = '1' THEN 'INSTORE' ELSE 'ONLINE' END AS TAG_INSTORE,
+  
+  CASE WHEN UPPER(A.CRD_PRODUCT_ID) IN ('BABY_EXPRESS_POINT_MLB_1', 'BABY_EXPRESS_POINT_MLA_1', 'BABY_EXPRESS_POINT_MLM_1') THEN 1 ELSE 0 END AS FLAG_BABY_DE, 
+
+SUM(CRD_CREDIT_AMOUNT) AS MONTO_ORIGINADO,
+
+cast(SUM(CASE
+      WHEN FLAG_COMPORTAMIENTO_PAGO=1 THEN DEFAULT_HOY_AMOUNT + funding_cost + other_cogs
+    ELSE  0 END  )/SUM(CASE  WHEN FLAG_COMPORTAMIENTO_PAGO=1 THEN CRD_CREDIT_HOY_REVENUES  ELSE  NULL  END
+    ) *100.00 as integer) AS LOSS_RATIO_HOYD,
+
+  cast(SUM(CASE
+      WHEN FLAG_COMPORTAMIENTO_PAGO=1 THEN DEFAULT_HOY_AMOUNT
+    ELSE
+    0
+  END
+    )/SUM(CASE
+      WHEN FLAG_COMPORTAMIENTO_PAGO=1 THEN CRD_CREDIT_HOY_REVENUES
+    ELSE
+    NULL
+  END
+    ) *100.00 as integer) AS LOSS_RATIO_HOYD_pre,
+
+  cast(SUM(CASE
+      WHEN FLAG_COMPORTAMIENTO_PAGO=1 THEN FPD_AMOUNT + funding_cost + other_cogs
+    ELSE
+    0
+  END
+    )/SUM(CASE
+      WHEN FLAG_COMPORTAMIENTO_PAGO=1 THEN CRD_CREDIT_REVENUES
+    ELSE
+    NULL
+  END
+    ) *100.00 as integer) AS LOSS_RATIO_23D,
+
+  cast(SUM(CASE
+      WHEN FLAG_COMPORTAMIENTO_PAGO=1 THEN FPD_AMOUNT
+    ELSE
+    0
+  END
+    )/SUM(CASE
+      WHEN FLAG_COMPORTAMIENTO_PAGO=1 THEN CRD_CREDIT_REVENUES
+    ELSE
+    NULL
+  END
+    ) *100.00 as integer) AS LOSS_RATIO_23D_pre,
+
+  SUM(CASE
+      WHEN a.FLAG_COMPORTAMIENTO_PAGO=1 THEN A.CRD_CREDIT_AMOUNT
+    ELSE
+    0
+  END
+    )/SUM(CRD_CREDIT_AMOUNT) *100.00 AS BHV_PAGO
+
+FROM vintage_de_modified A
+WHERE
+   SIT_SITE_ID IN ('MLM')
+  AND MES_ORIG BETWEEN 202201 AND 202211
+  AND FLAG_INSTORE = '1'
+GROUP BY 1, 2, 3
+order by 1;
+
+
+/*********************************
+  SALIDA VINTAGE DE: ONLINE
+*********************************/
+
+DROP TABLE IF EXISTS SBOX_CREDITS_SB.VISTA_VINTAGE_DE_MLM_ONLINE;
+ CREATE TABLE SBOX_CREDITS_SB.VISTA_VINTAGE_DE_MLM_ONLINE AS 
+SELECT
+  MES_ORIG,
+  CASE WHEN FLAG_INSTORE = '1' THEN 'INSTORE' ELSE 'ONLINE' END AS TAG_INSTORE,
+  CAST(SUM(CRD_CREDIT_AMOUNT) AS BIGINT) AS MONTO_ORIGINADO,
+
+
+cast(SUM(CASE
+      WHEN FLAG_COMPORTAMIENTO_PAGO=1 THEN DEFAULT_HOY_AMOUNT + funding_cost + other_cogs
+    ELSE  0 END  )/SUM(CASE  WHEN FLAG_COMPORTAMIENTO_PAGO=1 THEN CRD_CREDIT_HOY_REVENUES  ELSE  NULL  END
+    ) *100.00 as integer) AS LOSS_RATIO_HOYD,
+
+  cast(SUM(CASE
+      WHEN FLAG_COMPORTAMIENTO_PAGO=1 THEN DEFAULT_HOY_AMOUNT
+    ELSE
+    0
+  END
+    )/SUM(CASE
+      WHEN FLAG_COMPORTAMIENTO_PAGO=1 THEN CRD_CREDIT_HOY_REVENUES
+    ELSE
+    NULL
+  END
+    ) *100.00 as integer) AS LOSS_RATIO_HOYD_pre,
+
+  cast(SUM(CASE
+      WHEN FLAG_COMPORTAMIENTO_PAGO=1 THEN FPD_AMOUNT + funding_cost + other_cogs
+    ELSE
+    0
+  END
+    )/SUM(CASE
+      WHEN FLAG_COMPORTAMIENTO_PAGO=1 THEN CRD_CREDIT_REVENUES
+    ELSE
+    NULL
+  END
+    ) *100.00 as integer) AS LOSS_RATIO_23D,
+
+  cast(SUM(CASE
+      WHEN FLAG_COMPORTAMIENTO_PAGO=1 THEN FPD_AMOUNT
+    ELSE
+    0
+  END
+    )/SUM(CASE
+      WHEN FLAG_COMPORTAMIENTO_PAGO=1 THEN CRD_CREDIT_REVENUES
+    ELSE
+    NULL
+  END
+    ) *100.00 as integer) AS LOSS_RATIO_23D_pre,
+    
+  SUM(CASE
+      WHEN a.FLAG_COMPORTAMIENTO_PAGO=1 THEN A.CRD_CREDIT_AMOUNT
+    ELSE
+    0
+  END
+    )/SUM(CRD_CREDIT_AMOUNT) *100.00 AS BHV_PAGO
+
+FROM
+  vintage_de_modified A
+WHERE 1=1
+  AND SIT_SITE_ID IN ('MLM')
+  AND MES_ORIG BETWEEN 202201 AND 202211
+  AND FLAG_INSTORE = '0'
+GROUP BY 1,2
+order by 1;
+
+
+/*********************************
+  SALIDA VINTAGE DE: CONSOLIDADO
+*********************************/
+
+DROP TABLE IF EXISTS SBOX_CREDITS_SB.VISTA_VINTAGE_DE_MLM_CONSOLIDADO;
+CREATE TABLE SBOX_CREDITS_SB.VISTA_VINTAGE_DE_MLM_CONSOLIDADO AS 
+SELECT
+  MES_ORIG,
+  CAST(SUM(CRD_CREDIT_AMOUNT) AS BIGINT) AS MONTO_ORIGINADO,
+
+
+cast(SUM(CASE
+      WHEN FLAG_COMPORTAMIENTO_PAGO=1 THEN DEFAULT_HOY_AMOUNT + funding_cost + other_cogs
+    ELSE  0 END  )/SUM(CASE  WHEN FLAG_COMPORTAMIENTO_PAGO=1 THEN CRD_CREDIT_HOY_REVENUES  ELSE  NULL  END
+    ) *100.00 as integer) AS LOSS_RATIO_HOYD,
+
+  cast(SUM(CASE
+      WHEN FLAG_COMPORTAMIENTO_PAGO=1 THEN DEFAULT_HOY_AMOUNT
+    ELSE
+    0
+  END
+    )/SUM(CASE
+      WHEN FLAG_COMPORTAMIENTO_PAGO=1 THEN CRD_CREDIT_HOY_REVENUES
+    ELSE
+    NULL
+  END
+    ) *100.00 as integer) AS LOSS_RATIO_HOYD_pre,
+
+  cast(SUM(CASE
+      WHEN FLAG_COMPORTAMIENTO_PAGO=1 THEN FPD_AMOUNT + funding_cost + other_cogs
+    ELSE
+    0
+  END
+    )/SUM(CASE
+      WHEN FLAG_COMPORTAMIENTO_PAGO=1 THEN CRD_CREDIT_REVENUES
+    ELSE
+    NULL
+  END
+    ) *100.00 as integer) AS LOSS_RATIO_23D,
+
+  cast(SUM(CASE
+      WHEN FLAG_COMPORTAMIENTO_PAGO=1 THEN FPD_AMOUNT
+    ELSE
+    0
+  END
+    )/SUM(CASE
+      WHEN FLAG_COMPORTAMIENTO_PAGO=1 THEN CRD_CREDIT_REVENUES
+    ELSE
+    NULL
+  END
+    ) *100.00 as integer) AS LOSS_RATIO_23D_pre,
+    
+  SUM(CASE
+      WHEN a.FLAG_COMPORTAMIENTO_PAGO=1 THEN A.CRD_CREDIT_AMOUNT
+    ELSE
+    0
+  END
+    )/SUM(CRD_CREDIT_AMOUNT) *100.00 AS BHV_PAGO
+FROM vintage_de_modified A
+WHERE 1=1
+  AND SIT_SITE_ID IN ('MLM')
+  AND MES_ORIG BETWEEN 202204 AND 202211
+GROUP BY 1
+ORDER BY 1;
+
