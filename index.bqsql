@@ -1,0 +1,15 @@
+BEGIN
+CREATE TEMPORARY TABLE
+    parametros_vol AS
+SELECT
+    23 AS days,
+    15 AS days_proy;
+
+
+END;
+
+
+SELECT
+    *
+FROM
+    parametros_vol;

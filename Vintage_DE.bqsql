@@ -1,0 +1,1020 @@
+----------------------------------------------------
+----- CÓDIGO VINTAGE - DINERO EXPRESS  MLM ---------
+----------------------------------------------------
+-- Filtro de Jarvis Hist, el objetivo es eliminar duplicados de encendido. 
+-- esto es si se replico jarvis hist 2 veces el mismo mes, se queda con la 
+-- primera observación. 
+CREATE OR REPLACE TABLE
+  SBOX_CREDITS_SB.fechas_Encendido_Validas_Vintage_DE_MLM AS WITH
+  fechas_encendidos AS (
+    SELECT DISTINCT
+      AUD_INS_DT,
+      SBOX_CREDITS_SB.FECHA_PARSE (AUD_INS_DT) AS mes_encendido,
+    FROM
+      `meli-bi-data.SBOX_IT_CREDITS_CREDITSTBL.MC_JARVIS_HIST`
+    WHERE
+      tipo_loggeo="PERIODICO"
+      AND SIT_SITE_ID="MLM"
+      AND CAST(AUD_INS_DT AS DATE)>"2022-01-01"
+  ),
+  fechas_encendidos_2 AS (
+    SELECT
+      AUD_INS_DT,
+      mes_encendido,
+      ROW_NUMBER() OVER (
+        PARTITION BY
+          mes_encendido
+        ORDER BY
+          AUD_INS_DT
+      ) AS repeticiones
+    FROM
+      fechas_encendidos
+  )
+SELECT
+  *
+FROM
+  fechas_encendidos_2
+WHERE
+  repeticiones=1;
+
+
+CREATE OR REPLACE TABLE
+  SBOX_CREDITS_SB.Jhist_reducidad AS
+SELECT
+  A.* EXCEPT (EMAIL,CUS_PHONE),
+  B.mes_encendido
+FROM
+  `meli-bi-data.SBOX_IT_CREDITS_CREDITSTBL.MC_JARVIS_HIST` AS A
+  INNER JOIN SBOX_CREDITS_SB.Fechas_encendido_validas_vintage_DE_MLM AS B ON A.AUD_INS_DT=B.AUD_INS_DT;
+
+
+CREATE OR REPLACE TABLE
+  SBOX_CREDITS_SB.Base_Vintage_MLM_Pura AS
+SELECT
+  A.*,
+  B.tag_oferta,
+  B.TAG_TPV_SEGMENT_L3M,
+  B.MONTHLY_TPV_LC,
+  B.TAG_TPV_SEGMENT_M1,
+  B.RATING_CHURN,
+  B.TAG_TIPO_BORROWER_DE,
+  B.TAG_POINT,
+  B.TAG_OFERTA_DE,
+  B.TPV_LC_M1,
+  B.ACTIVITY,
+  B.FLAG_DE
+FROM
+  SBOX_CREDITS_SB.Base_Vintage_MLM_DE AS A
+  LEFT JOIN SBOX_CREDITS_SB.Jhist_reducidad AS B ON a.cus_cust_id_borrower=b.CUS_CUST_ID_SEL
+  AND B.mes_encendido=A.mes_orig
+  -- se decidio hacer períodico para ser consistente en el análisis
+WHERE
+  1=1
+  AND tipo_loggeo="PERIODICO"
+  AND B.SIT_SITE_ID="MLM"
+  -- filtro fecha para hacer más eficiente la query
+  AND CAST(B.AUD_INS_DT AS DATE)>="2021-12-01"
+  AND CAST(A.crd_credit_creation_date_id AS DATE)>="2022-01-01";
+
+
+---- Cuanto se le Propuso al cliente
+CREATE OR REPLACE TABLE SBOX_CREDITS_SB.Vintage_AmountsProposed as
+select a.* , b.CRD_PROP_TOTAL_AMOUNT  
+ from  SBOX_CREDITS_SB.Base_Vintage_MLM_Pura as a  
+ left join  `meli-bi-data.SBOX_IT_CREDITS_CREDITSTBL.BASE_MC_CRED`  as b
+ on a.crd_credit_id=b.crd_credit_id;
+
+
+
+
+
+CREATE OR REPLACE TABLE SBOX_CREDITS_SB.caps_parametricos as
+select 
+  CRD_CREDIT_ID,
+  Case
+   WHEN 
+      FLAG_INSTORE=1 then 150000
+    WHEN  
+      TAG_OFERTA="NO OFERTABLE" or "EARLY OFFER" then 300000
+    WHEN
+      FLAG_INSTORE=0 and tag_oferta in
+       ("NO OFERTABLE" ,"EARLY OFFER") and rating_churn 
+       in ("F","D","E","G")then 300000
+    else 750000 end as CAP_param
+ from SBOX_CREDITS_SB.Vintage_AmountsProposed;
+
+
+select DISTINCT FLAG_INSTORE from SBOX_CREDITS_SB.Vintage_AmountsProposed;
+
+
+CREATE OR REPLACE TABLE SBOX_CREDITS_SB.caps_parametricos as
+select 
+  CRD_CREDIT_ID,
+  Case
+   WHEN 
+      FLAG_INSTORE="1" then 150000
+    WHEN  
+      (TAG_OFERTA="NO OFERTABLE" or TAG_OFERTA="EARLY OFFER") then 300000
+    WHEN
+      FLAG_INSTORE="0" and TAG_OFERTA in
+       ("NO OFERTABLE" ,"EARLY OFFER") and rating_churn in ("F","D","E","G")then 300000
+    else 750000 end as cap
+ from SBOX_CREDITS_SB.Vintage_AmountsProposed;
+
+CREATE OR REPLACE TABLE
+  SBOX_CREDITS_SB.Base_Vintage_Flags AS
+SELECT
+  MES_ORIG,
+  a.CRD_CREDIT_ID,
+  CRD_CREDIT_AMOUNT,
+  CRD_PROP_TOTAL_AMOUNT,
+  FLAG_COMPORTAMIENTO_PAGO,
+  DEFAULT_HOY_AMOUNT,
+  FUNDING_COST,
+  OTHER_COGS,
+  FPD_AMOUNT,
+  CRD_CREDIT_HOY_REVENUES,
+  CRD_CREDIT_REVENUES,
+  FLAG_INSTORE,
+  case when abs(CRD_CREDIT_AMOUNT-CRD_PROP_TOTAL_AMOUNT)<10
+  then "Topeado"
+  else "No Topeado"end as FLAG_TOPEADO,
+  b.cap,
+  case when abs(cap-CRD_PROP_TOTAL_AMOUNT)<50 then 1  else 0 end AS Flag_cap,
+  ---nuevos testear 
+  DIAS_ATRASO,
+  PLAZO,
+  TNA,
+  TAG_OFERTA_DE AS FLAG_OFERTA,
+  TAG_POINT AS FLAG_POINT, -- QR, POINT, POINT PRO
+  TAG_TIPO_BORROWER_DE AS FLAG_TIPO_BORROWER, -- OLD, NEW, NEW2L
+  RATING_CHURN AS FLAG_RATING_CHURN, -- A,B,C..
+  COUNT(*) OVER (partition by a.mes_orig ) AS Total_Originaciones_Mensuales,
+  Case 
+    WHEN (MONTHLY_TPV_LC=0 OR MONTHLY_TPV_LC IS NULL) AND TPV_LC_M1 IS NULL THEN '0.NULL'
+    WHEN MONTHLY_TPV_LC>0 AND MONTHLY_TPV_LC<5001 THEN '1.LOLOS'
+    WHEN (MONTHLY_TPV_LC=0 OR MONTHLY_TPV_LC IS NULL) AND TPV_LC_M1<5001 THEN '1.LOLOS'
+    WHEN MONTHLY_TPV_LC>0 AND MONTHLY_TPV_LC<30001 THEN '2.MILOS'
+    WHEN (MONTHLY_TPV_LC=0 OR MONTHLY_TPV_LC IS NULL) AND TPV_LC_M1<30001 THEN '2.MILOS'
+    WHEN MONTHLY_TPV_LC>0 AND MONTHLY_TPV_LC<100001 THEN '3.HILOS'
+    WHEN (MONTHLY_TPV_LC=0 OR MONTHLY_TPV_LC IS NULL) AND TPV_LC_M1<100001 THEN '3.HILOS'
+    WHEN MONTHLY_TPV_LC>0 AND MONTHLY_TPV_LC<2000001 THEN '4.SMBs'
+    WHEN (MONTHLY_TPV_LC=0 OR MONTHLY_TPV_LC IS NULL) AND TPV_LC_M1<2000001 THEN '4.SMBs'
+    WHEN MONTHLY_TPV_LC>0 AND MONTHLY_TPV_LC>=2000001 THEN '5.BIG_SELLERS'
+    WHEN (MONTHLY_TPV_LC=0 OR MONTHLY_TPV_LC IS NULL) AND TPV_LC_M1>=2000001 THEN '5.BIG_SELLERS'
+    END as TPV_SEGMENT,
+ CASE
+    WHEN TAG_OFERTA="NO OFERTABLE" THEN "EARLY OFFER"
+    ELSE TAG_OFERTA
+  END AS FLAG_TIPO_OFERTA, --Full offer , early offfer, no ofertable
+  CASE
+    WHEN UPPER(CRD_PRODUCT_ID) IN ('BABY_EXPRESS_POINT_MLM_1') THEN 1
+    ELSE 0
+  END AS FLAG_BABY_DE,
+FROM
+  SBOX_CREDITS_SB.Vintage_AmountsProposed as a 
+left join SBOX_CREDITS_SB.caps_parametricos b 
+on a.crd_credit_id=b.crd_credit_id; 
+
+
+------------------------------------------
+-------  Vintage To Excel -------------
+------------------------------------------
+------------ TABLAS POR FLAG ------------
+-- 0. CONSOLIDADO  - OKEY 
+-- 1. FLAG DEVICE
+-- 2. REGLA BAU Ó REGLA FLEX
+-- 3. CHURN RATING
+-- 4. BORROWER TYPE
+-- 5- EO/FO
+-- 6- SEGMENTACIÓN TPV
+-- 7- ONLINE
+-- 8- INSTORE
+--FALTAN
+--  CAPS, CONSUMER CONVIVENCIA, 
+
+-- 0. CONSOLIDADO
+
+CREATE or replace TABLE
+    SBOX_CREDITS_SB.BASE_VINTAGE_MLM_DE_CONSOLIDADO AS
+SELECT
+  MES_ORIG,
+  count(*) as CANTIDAD,
+  CAST(SUM(CRD_CREDIT_AMOUNT) AS BIGINT) AS MONTO_ORIGINADO,
+  ROUND(AVG(PLAZO),2) AS PLAZO_PROMEDIO,
+  ROUND(AVG(TNA),2) AS TASA_PROMEDIO,
+  APPROX_QUANTILES(CRD_CREDIT_AMOUNT, 100)[OFFSET(50)]  as Mediana_Monto,
+  APPROX_QUANTILES(CRD_CREDIT_AMOUNT, 100)[OFFSET(25)]  as monto_perct_25,
+  APPROX_QUANTILES(CRD_CREDIT_AMOUNT, 100)[OFFSET(75)]  as monto_perct_75,
+  APPROX_QUANTILES(CRD_CREDIT_AMOUNT, 100)[OFFSET(90)]  as monto_perct_90,
+  APPROX_QUANTILES(CRD_CREDIT_AMOUNT, 100)[OFFSET(99)]  as monto_perct_99,
+  APPROX_QUANTILES(DEFAULT_HOY_AMOUNT, 100)[OFFSET(50)]  as Mediana_default,
+  CAST(
+    SUM(
+      CASE
+        WHEN FLAG_COMPORTAMIENTO_PAGO=1 THEN DEFAULT_HOY_AMOUNT+funding_cost+other_cogs
+        ELSE 0
+      END
+    )/SUM(
+      CASE
+        WHEN FLAG_COMPORTAMIENTO_PAGO=1 THEN CRD_CREDIT_HOY_REVENUES
+        ELSE NULL
+      END
+    )*100.00 AS INTEGER
+  ) AS LOSS_RATIO_HOY,
+  CAST(
+    SUM(
+      CASE
+        WHEN FLAG_COMPORTAMIENTO_PAGO=1 THEN FPD_AMOUNT+funding_cost+other_cogs
+        ELSE 0
+      END
+  )/SUM(
+      CASE
+        WHEN FLAG_COMPORTAMIENTO_PAGO=1 THEN CRD_CREDIT_REVENUES
+        ELSE NULL
+      END
+    )*100.00 AS INTEGER
+  ) AS LOSS_RATIO_23D,
+  ROUND(
+    SUM(
+      CASE
+        WHEN FLAG_COMPORTAMIENTO_PAGO=1 THEN CRD_CREDIT_AMOUNT
+        ELSE 0
+      END
+    )/SUM(CRD_CREDIT_AMOUNT)*100.00,
+    2
+  ) AS BHV_PAGO
+FROM
+  SBOX_CREDITS_SB.Base_Vintage_Flags
+GROUP BY
+  1 
+HAVING
+  BHV_PAGO>50
+ORDER BY 1 ;
+
+
+
+
+
+
+-- 1. FLAG DEVICE
+
+CREATE OR REPLACE TABLE
+  SBOX_CREDITS_SB.BASE_VINTAGE_MLM_DE_FLAG_POINT AS
+SELECT
+  MES_ORIG,
+  CASE WHEN FLAG_POINT ="QR" then "POINT" 
+  Else FLAG_POINT end as FLAG_POINT,
+  FLAG_BABY_DE,
+  COUNT(*) AS CANTIDAD,
+  COUNT(*)/MAX(TOTAL_ORIGINACIONES_MENSUALES) AS Q_FRAC,
+  ROUND(AVG(PLAZO),2) AS PLAZO_PROMEDIO,
+  ROUND(AVG(TNA),2) AS TASA_PROMEDIO,
+  APPROX_QUANTILES(CRD_CREDIT_AMOUNT, 100)[OFFSET(50)]  as Mediana_Monto,
+  APPROX_QUANTILES(CRD_CREDIT_AMOUNT, 100)[OFFSET(25)]  as monto_perct_25,
+  APPROX_QUANTILES(CRD_CREDIT_AMOUNT, 100)[OFFSET(75)]  as monto_perct_75,
+  APPROX_QUANTILES(CRD_CREDIT_AMOUNT, 100)[OFFSET(90)]  as monto_perct_90,
+  APPROX_QUANTILES(CRD_CREDIT_AMOUNT, 100)[OFFSET(99)]  as monto_perct_99,
+  APPROX_QUANTILES(DEFAULT_HOY_AMOUNT, 100)[OFFSET(50)]  as Mediana_default,
+  CAST(SUM(CRD_CREDIT_AMOUNT) AS BIGINT) AS MONTO_ORIGINADO,
+  CAST(
+    SUM(
+      CASE
+        WHEN FLAG_COMPORTAMIENTO_PAGO=1 THEN DEFAULT_HOY_AMOUNT+FUNDING_COST+OTHER_COGS
+        ELSE 0
+      END
+    )/SUM(
+      CASE
+        WHEN FLAG_COMPORTAMIENTO_PAGO=1 THEN CRD_CREDIT_HOY_REVENUES
+        ELSE NULL
+      END
+    )*100.00 AS INTEGER
+  ) AS LOSS_RATIO_HOY,
+  CAST(
+    SUM(
+      CASE
+        WHEN FLAG_COMPORTAMIENTO_PAGO=1 THEN FPD_AMOUNT+FUNDING_COST+OTHER_COGS
+        ELSE 0
+      END
+  )/SUM(
+      CASE
+        WHEN FLAG_COMPORTAMIENTO_PAGO=1 THEN CRD_CREDIT_REVENUES
+        ELSE NULL
+      END
+    )*100.00 AS INTEGER
+  ) AS LOSS_RATIO_23D,
+  ROUND(
+    SUM(
+      CASE
+        WHEN FLAG_COMPORTAMIENTO_PAGO=1 THEN CRD_CREDIT_AMOUNT
+        ELSE 0
+      END
+    )/SUM(CRD_CREDIT_AMOUNT)*100.00,
+    2
+  ) AS BHV_PAGO
+FROM
+  SBOX_CREDITS_SB.Base_Vintage_Flags
+WHERE
+  FLAG_POINT IS NOT NULL
+GROUP BY
+  1,
+  2,
+  3
+HAVING
+  BHV_PAGO>50
+ORDER BY
+  1 DESC ,
+  2,
+  3;
+
+
+
+-- Flag OFERTA  - BAU Ó FLEX
+CREATE OR REPLACE TABLE
+  SBOX_CREDITS_SB.BASE_VINTAGE_MLM_DE_FLAG_OFERTA AS
+SELECT
+  MES_ORIG,
+  CASE WHEN FLAG_OFERTA in ("REGLA BAU", "1ST RULE") then "REGLA BAU" 
+  ELSE "REGLA FLEX" END as FLAG_OFERTA,
+  COUNT(*)                               AS Q,
+  ROUND(AVG(PLAZO),2) AS PLAZO_PROMEDIO,
+  ROUND(AVG(TNA),2) AS TASA_PROMEDIO,
+  APPROX_QUANTILES(CRD_CREDIT_AMOUNT, 100)[OFFSET(50)]  as Mediana_Monto,
+  APPROX_QUANTILES(CRD_CREDIT_AMOUNT, 100)[OFFSET(25)]  as monto_perct_25,
+  APPROX_QUANTILES(CRD_CREDIT_AMOUNT, 100)[OFFSET(75)]  as monto_perct_75,
+  APPROX_QUANTILES(CRD_CREDIT_AMOUNT, 100)[OFFSET(90)]  as monto_perct_90,
+  APPROX_QUANTILES(CRD_CREDIT_AMOUNT, 100)[OFFSET(99)]  as monto_perct_99,
+  APPROX_QUANTILES(DEFAULT_HOY_AMOUNT, 100)[OFFSET(50)]  as Mediana_default,
+  CAST(SUM(CRD_CREDIT_AMOUNT) AS BIGINT) AS MONTO_ORIGINADO,
+  CAST(
+    SUM(
+      CASE
+        WHEN FLAG_COMPORTAMIENTO_PAGO=1 THEN DEFAULT_HOY_AMOUNT+funding_cost+other_cogs
+        ELSE 0
+      END
+    )/SUM(
+      CASE
+        WHEN FLAG_COMPORTAMIENTO_PAGO=1 THEN CRD_CREDIT_HOY_REVENUES
+        ELSE NULL
+      END
+    )*100.00 AS INTEGER
+  ) AS LOSS_RATIO_HOY,
+  CAST(
+    SUM(
+      CASE
+        WHEN FLAG_COMPORTAMIENTO_PAGO=1 THEN FPD_AMOUNT+funding_cost+other_cogs
+        ELSE 0
+      END
+    )/SUM(
+      CASE
+        WHEN FLAG_COMPORTAMIENTO_PAGO=1 THEN CRD_CREDIT_REVENUES
+        ELSE NULL
+      END
+    )*100.00 AS INTEGER
+  ) AS LOSS_RATIO_23D,
+  ROUND(
+    SUM(
+      CASE
+        WHEN FLAG_COMPORTAMIENTO_PAGO=1 THEN CRD_CREDIT_AMOUNT
+        ELSE 0
+      END
+    )/SUM(CRD_CREDIT_AMOUNT)*100.00,
+    2
+  ) AS BHV_PAGO
+FROM
+  SBOX_CREDITS_SB.Base_Vintage_Flags
+WHERE
+  FLAG_BABY_DE=0
+GROUP BY
+  1,
+  2
+HAVING
+  BHV_PAGO>50
+ORDER BY
+  1 desc,
+  2;
+
+-- 3. Vista por Rating de Chunrn
+
+CREATE OR REPLACE TABLE
+  SBOX_CREDITS_SB.BASE_VINTAGE_MLM_DE_FLAG_CHURN0 AS
+SELECT
+  MES_ORIG,
+  FLAG_RATING_CHURN,
+  COUNT(*) as Q, 
+  SUM(CRD_CREDIT_AMOUNT) AS MONTO_ORIGINADO,
+  CAST(
+    SUM(
+      CASE
+        WHEN FLAG_COMPORTAMIENTO_PAGO=1 THEN DEFAULT_HOY_AMOUNT+funding_cost+other_cogs
+        ELSE 0
+      END
+    )/SUM(
+      CASE
+        WHEN FLAG_COMPORTAMIENTO_PAGO=1 THEN CRD_CREDIT_HOY_REVENUES
+        ELSE NULL
+      END
+    )*100.00 AS INTEGER
+  ) AS LOSS_RATIO_HOY,
+  CAST(
+    SUM(
+      CASE
+        WHEN FLAG_COMPORTAMIENTO_PAGO=1 THEN FPD_AMOUNT+funding_cost+other_cogs
+        ELSE 0
+      END
+    )/SUM(
+      CASE
+        WHEN FLAG_COMPORTAMIENTO_PAGO=1 THEN CRD_CREDIT_REVENUES
+        ELSE NULL
+      END
+    )*100.00 AS INTEGER
+  ) AS LOSS_RATIO_23D,
+  ROUND(
+    SUM(
+      CASE
+        WHEN FLAG_COMPORTAMIENTO_PAGO=1 THEN CRD_CREDIT_AMOUNT
+        ELSE 0
+      END
+    )/SUM(CRD_CREDIT_AMOUNT)*100.00,
+    2
+  ) AS BHV_PAGO
+FROM
+  SBOX_CREDITS_SB.Base_Vintage_Flags 
+WHERE
+  FLAG_RATING_CHURN IS NOT NULL
+GROUP BY
+  1,
+  2
+HAVING
+  BHV_PAGO>50
+ORDER BY
+  1 desc,
+  2;
+
+
+
+
+CREATE OR REPLACE TABLE
+  SBOX_CREDITS_SB.BASE_VINTAGE_MLM_DE_FLAG_CHURN AS
+with tablaMensual as (
+select
+  mes_orig ,
+  sum(Q) as totalMensual
+ from  SBOX_CREDITS_SB.BASE_VINTAGE_MLM_DE_FLAG_CHURN0
+ GROUP BY
+   mes_orig )
+  select a.*, a.Q/b.totalMensual as frac_total
+    from SBOX_CREDITS_SB.BASE_VINTAGE_MLM_DE_FLAG_CHURN as a
+    inner join tablaMensual as b
+     on a.mes_orig = b.mes_orig
+  ORDER BY
+  1 desc,
+  2;
+
+
+-- 4. BORROWER TYPE
+
+CREATE OR REPLACE TABLE
+  SBOX_CREDITS_SB.BASE_VINTAGE_MLM_DE_FLAG_BORROWER_TYPE AS
+SELECT
+  MES_ORIG,
+  FLAG_TIPO_BORROWER,
+  count(*) as Q,
+  CAST(SUM(CRD_CREDIT_AMOUNT) AS BIGINT) AS MONTO_ORIGINADO,
+  CAST(
+    SUM(
+      CASE
+        WHEN FLAG_COMPORTAMIENTO_PAGO=1 THEN DEFAULT_HOY_AMOUNT+funding_cost+other_cogs
+        ELSE 0
+      END
+    )/SUM(
+      CASE
+        WHEN FLAG_COMPORTAMIENTO_PAGO=1 THEN CRD_CREDIT_HOY_REVENUES
+        ELSE NULL
+      END
+    )*100.00 AS INTEGER
+  ) AS LOSS_RATIO_HOY,
+  CAST(
+    SUM(
+      CASE
+        WHEN FLAG_COMPORTAMIENTO_PAGO=1 THEN FPD_AMOUNT+funding_cost+other_cogs
+        ELSE 0
+      END
+    )/SUM(
+      CASE
+        WHEN FLAG_COMPORTAMIENTO_PAGO=1 THEN CRD_CREDIT_REVENUES
+        ELSE NULL
+      END
+    )*100.00 AS INTEGER
+  ) AS LOSS_RATIO_23D,
+  ROUND(
+    SUM(
+      CASE
+        WHEN FLAG_COMPORTAMIENTO_PAGO=1 THEN CRD_CREDIT_AMOUNT
+        ELSE 0
+      END
+    )/SUM(CRD_CREDIT_AMOUNT)*100.00,
+    2
+  ) AS BHV_PAGO
+FROM
+  SBOX_CREDITS_SB.Base_Vintage_Flags
+GROUP BY
+  1,
+  2
+HAVING
+  BHV_PAGO>50
+ORDER BY
+  1 desc,
+  2;
+
+
+
+--5. EO/FO - PREGUNTAR POR NO OFERTABLE --
+-- LE METEMOS EARLY OFFER A LOS NO OFERTABLE. 
+
+CREATE OR REPLACE TABLE
+  SBOX_CREDITS_SB.BASE_VINTAGE_MLM_DE_FLAG_TIPO_OFERTA AS
+SELECT
+  MES_ORIG,
+  CASE
+    WHEN FLAG_TIPO_OFERTA="NO OFERTABLE" THEN "EARLY OFFER"
+    ELSE FLAG_TIPO_OFERTA
+  END AS FLAG_TIPO_OFERTAS,
+    ROUND(AVG(PLAZO),2) AS PLAZO_PROMEDIO,
+  ROUND(AVG(TNA),2) AS TASA_PROMEDIO,
+  APPROX_QUANTILES(CRD_CREDIT_AMOUNT, 100)[OFFSET(50)]  as Mediana_Monto,
+  APPROX_QUANTILES(CRD_CREDIT_AMOUNT, 100)[OFFSET(25)]  as monto_perct_25,
+  APPROX_QUANTILES(CRD_CREDIT_AMOUNT, 100)[OFFSET(75)]  as monto_perct_75,
+  APPROX_QUANTILES(CRD_CREDIT_AMOUNT, 100)[OFFSET(90)]  as monto_perct_90,
+  APPROX_QUANTILES(CRD_CREDIT_AMOUNT, 100)[OFFSET(99)]  as monto_perct_99,
+  APPROX_QUANTILES(DEFAULT_HOY_AMOUNT, 100)[OFFSET(50)]  as Mediana_default,
+  count(*) as CANTIDAD,
+  CAST(SUM(CRD_CREDIT_AMOUNT) AS BIGINT) AS MONTO_ORIGINADO,
+  CAST(
+    SUM(
+      CASE
+        WHEN FLAG_COMPORTAMIENTO_PAGO=1 THEN DEFAULT_HOY_AMOUNT+funding_cost+other_cogs
+        ELSE 0
+      END
+    )/SUM(
+      CASE
+        WHEN FLAG_COMPORTAMIENTO_PAGO=1 THEN CRD_CREDIT_HOY_REVENUES
+        ELSE NULL
+      END
+    )*100.00 AS INTEGER
+  ) AS LOSS_RATIO_HOY,
+  CAST(
+    SUM(
+      CASE
+        WHEN FLAG_COMPORTAMIENTO_PAGO=1 THEN FPD_AMOUNT+funding_cost+other_cogs
+        ELSE 0
+      END
+    )/SUM(
+      CASE
+        WHEN FLAG_COMPORTAMIENTO_PAGO=1 THEN CRD_CREDIT_REVENUES
+        ELSE NULL
+      END
+    )*100.00 AS INTEGER
+  ) AS LOSS_RATIO_23D,
+  ROUND(
+    SUM(
+      CASE
+        WHEN FLAG_COMPORTAMIENTO_PAGO=1 THEN CRD_CREDIT_AMOUNT
+        ELSE 0
+      END
+    )/SUM(CRD_CREDIT_AMOUNT)*100.00,
+    2
+  ) AS BHV_PAGO
+FROM
+  SBOX_CREDITS_SB.Base_Vintage_Flags
+GROUP BY
+  1,
+  2
+HAVING
+  BHV_PAGO>50
+ORDER BY
+  1 desc,
+  2;
+
+
+-- 6 SEGEMENTACIÓN TPV -- PREGUNTAR MUCHOS NULLS - RAZÓN SE APLICO EN MAYO EL SEGMENTACIÓN 
+-- CALCULAR MAYO PARA ATRAS EL SEGMENTO
+-- MIRAR EL DOCUMENTO DE MERY, USAMOS MONTHLY, TPV_LC_M1
+-- USANDO LA TABLA MC_PARAM_TPV_SEGMENT
+
+CREATE OR REPLACE TABLE
+  SBOX_CREDITS_SB.BASE_VINTAGE_MLM_DE_FLAG_SEGMENTO AS
+SELECT
+  MES_ORIG,
+  TPV_SEGMENT,
+  ROUND(AVG(PLAZO),2) AS PLAZO_PROMEDIO,
+  ROUND(AVG(TNA),2) AS TASA_PROMEDIO,
+  APPROX_QUANTILES(CRD_CREDIT_AMOUNT, 100)[OFFSET(50)]  as Mediana_Monto,
+  APPROX_QUANTILES(CRD_CREDIT_AMOUNT, 100)[OFFSET(25)]  as monto_perct_25,
+  APPROX_QUANTILES(CRD_CREDIT_AMOUNT, 100)[OFFSET(75)]  as monto_perct_75,
+  APPROX_QUANTILES(CRD_CREDIT_AMOUNT, 100)[OFFSET(90)]  as monto_perct_90,
+  APPROX_QUANTILES(CRD_CREDIT_AMOUNT, 100)[OFFSET(99)]  as monto_perct_99,
+  count(*) as CANTIDAD,
+  CAST(SUM(CRD_CREDIT_AMOUNT) AS BIGINT) AS MONTO_ORIGINADO,
+  CAST(
+    SUM(
+      CASE
+        WHEN FLAG_COMPORTAMIENTO_PAGO=1 THEN DEFAULT_HOY_AMOUNT+funding_cost+other_cogs
+        ELSE 0
+      END
+    )/SUM(
+      CASE
+        WHEN FLAG_COMPORTAMIENTO_PAGO=1 THEN CRD_CREDIT_HOY_REVENUES
+        ELSE NULL
+      END
+    )*100.00 AS INTEGER
+  ) AS LOSS_RATIO_HOY,
+  CAST(
+    SUM(
+      CASE
+        WHEN FLAG_COMPORTAMIENTO_PAGO=1 THEN FPD_AMOUNT+funding_cost+other_cogs
+        ELSE 0
+      END
+    )/SUM(
+      CASE
+        WHEN FLAG_COMPORTAMIENTO_PAGO=1 THEN CRD_CREDIT_REVENUES
+        ELSE NULL
+      END
+    )*100.00 AS INTEGER
+  ) AS LOSS_RATIO_23D,
+  ROUND(
+    SUM(
+      CASE
+        WHEN FLAG_COMPORTAMIENTO_PAGO=1 THEN CRD_CREDIT_AMOUNT
+        ELSE 0
+      END
+    )/SUM(CRD_CREDIT_AMOUNT)*100.00,
+    2
+  ) AS BHV_PAGO
+FROM
+  SBOX_CREDITS_SB.Base_Vintage_Flags
+GROUP BY
+  1,
+  2
+HAVING
+  BHV_PAGO>50
+ORDER BY
+  1 desc,
+  2;
+
+
+-- 7- ONLINE/INSTORE
+
+
+CREATE OR REPLACE TABLE 
+  SBOX_CREDITS_SB.BASE_VINTAGE_MLM_DE_FLAG_TIPO_SELLER AS
+SELECT
+  MES_ORIG,
+  CASE     FLAG_INSTORE
+    WHEN "1" THEN "ONLINE"
+    WHEN "0" THEN "INSTORE"
+    ELSE NULL
+  END AS FLAG_TIPO_SELLER,
+  COUNT(*) AS CANTIDAD,
+  CAST(SUM(CRD_CREDIT_AMOUNT) AS BIGINT) AS MONTO_ORIGINADO,
+  ROUND(AVG(PLAZO),2) AS PLAZO_PROMEDIO,
+  ROUND(AVG(TNA),2) AS TASA_PROMEDIO,
+  APPROX_QUANTILES(CRD_CREDIT_AMOUNT, 100)[OFFSET(50)]  AS MEDIANA_MONTO,
+  APPROX_QUANTILES(CRD_CREDIT_AMOUNT, 100)[OFFSET(25)]  AS MONTO_PERCT_25,
+  APPROX_QUANTILES(CRD_CREDIT_AMOUNT, 100)[OFFSET(75)]  AS MONTO_PERCT_75,
+  APPROX_QUANTILES(CRD_CREDIT_AMOUNT, 100)[OFFSET(90)]  AS MONTO_PERCT_90,
+  APPROX_QUANTILES(CRD_CREDIT_AMOUNT, 100)[OFFSET(99)]  AS MONTO_PERCT_99,
+  CAST(
+    SUM(
+      CASE
+        WHEN FLAG_COMPORTAMIENTO_PAGO=1 THEN DEFAULT_HOY_AMOUNT+FUNDING_COST+OTHER_COGS
+        ELSE 0
+      END
+    )/SUM(
+      CASE
+        WHEN FLAG_COMPORTAMIENTO_PAGO=1 THEN CRD_CREDIT_HOY_REVENUES
+        ELSE NULL
+      END
+    )*100.00 AS INTEGER
+  ) AS LOSS_RATIO_HOY,
+  CAST(
+    SUM(
+      CASE
+        WHEN FLAG_COMPORTAMIENTO_PAGO=1 THEN FPD_AMOUNT+FUNDING_COST+OTHER_COGS
+        ELSE 0
+      END
+    )/SUM(
+      CASE
+        WHEN FLAG_COMPORTAMIENTO_PAGO=1 THEN CRD_CREDIT_REVENUES
+        ELSE NULL
+      END
+    )*100.00 AS INTEGER
+  ) AS LOSS_RATIO_23D,
+  ROUND(
+    SUM(
+      CASE
+        WHEN FLAG_COMPORTAMIENTO_PAGO=1 THEN CRD_CREDIT_AMOUNT
+        ELSE 0
+      END
+    )/SUM(CRD_CREDIT_AMOUNT)*100.00,
+    2
+  ) AS BHV_PAGO
+FROM
+  SBOX_CREDITS_SB.Base_Vintage_Flags
+  WHERE FLAG_BABY_DE=0
+GROUP BY
+  1,
+  2
+HAVING
+  BHV_PAGO>50
+ORDER BY
+  1 DESC,
+  2;
+
+
+-- 8. Baby offer 
+
+create or replace table
+  sbox_credits_sb.base_vintage_mlm_de_flag_baby as
+select
+  mes_orig,
+  COUNT(*) AS CANTIDAD,
+  cast(sum(crd_credit_amount) as bigint) as monto_originado,
+  round(avg(plazo),2) as plazo_promedio,
+  round(avg(tna),2) as tasa_promedio,
+  approx_quantiles(crd_credit_amount, 100)[offset(50)]  as mediana_monto,
+  approx_quantiles(crd_credit_amount, 100)[offset(25)]  as monto_perct_25,
+  approx_quantiles(crd_credit_amount, 100)[offset(75)]  as monto_perct_75,
+  approx_quantiles(crd_credit_amount, 100)[offset(90)]  as monto_perct_90,
+  approx_quantiles(crd_credit_amount, 100)[offset(99)]  as monto_perct_99,
+  cast(
+    sum(
+      case
+        when flag_comportamiento_pago=1 then default_hoy_amount+FUNDING_COST+OTHER_COGS
+        else 0
+      end
+    )/sum(
+      case
+        when flag_comportamiento_pago=1 then crd_credit_hoy_revenues
+        else null
+      end
+    )*100.00 as integer
+  ) as loss_ratio_hoy,
+  cast(
+    sum(
+      case
+        when flag_comportamiento_pago=1 then fpd_amount+FUNDING_COST+OTHER_COGS
+        else 0
+      end
+    )/sum(
+      case
+        when flag_comportamiento_pago=1 then crd_credit_revenues
+        else null
+      end
+    )*100.00 as integer
+  ) as loss_ratio_23d,
+  round(
+    sum(
+      case
+        when flag_comportamiento_pago=1 then crd_credit_amount
+        else 0
+      end
+    )/sum(crd_credit_amount)*100.00,
+    2
+  ) as bhv_pago
+from
+  SBOX_CREDITS_SB.Base_Vintage_Flags
+where
+  flag_baby_de=1
+group by
+  1
+having
+  bhv_pago>50
+order by
+  1 DESC;
+
+
+
+-- 9 CAPEADOS
+create or replace table
+ SBOX_CREDITS_SB.base_vintage_capeados as
+select
+  mes_orig,
+  FLAG_RATING_CHURN,
+  max(cap) as CAP,
+  sum(flag_cap) as cantidad_capeados,
+  (sum(flag_cap)/count(*)) as porcentaje_Capeados,
+  COUNT(*) AS CANTIDAD,
+  cast(sum(crd_credit_amount) as bigint) as monto_originado,
+  round(avg(plazo),2) as plazo_promedio,
+  round(avg(tna),2) as tasa_promedio,
+  approx_quantiles(crd_credit_amount, 100)[offset(50)]  as mediana_monto,
+  approx_quantiles(crd_credit_amount, 100)[offset(25)]  as monto_perct_25,
+  approx_quantiles(crd_credit_amount, 100)[offset(75)]  as monto_perct_75,
+  approx_quantiles(crd_credit_amount, 100)[offset(90)]  as monto_perct_90,
+  approx_quantiles(crd_credit_amount, 100)[offset(99)]  as monto_perct_99,
+  approx_quantiles(CRD_PROP_TOTAL_AMOUNT, 100)[offset(50)]  as mediana_propuesta,
+  approx_quantiles(CRD_PROP_TOTAL_AMOUNT, 100)[offset(25)]  as propuesta_perct_25,
+  approx_quantiles(CRD_PROP_TOTAL_AMOUNT, 100)[offset(75)]  as propuesta_perct_75,
+  approx_quantiles(CRD_PROP_TOTAL_AMOUNT, 100)[offset(90)]  as propuesta_perct_90,
+  approx_quantiles(CRD_PROP_TOTAL_AMOUNT, 100)[offset(99)]  as propuesta_perct_99,
+  cast(
+    sum(
+      case
+        when flag_comportamiento_pago=1 then default_hoy_amount+FUNDING_COST+OTHER_COGS
+        else 0
+      end
+    )/sum(
+      case
+        when flag_comportamiento_pago=1 then crd_credit_hoy_revenues
+        else null
+      end
+    )*100.00 as integer
+  ) as loss_ratio_hoy,
+  cast(
+    sum(
+      case
+        when flag_comportamiento_pago=1 then fpd_amount+FUNDING_COST+OTHER_COGS
+        else 0
+      end
+    )/sum(
+      case
+        when flag_comportamiento_pago=1 then crd_credit_revenues
+        else null
+      end
+    )*100.00 as integer
+  ) as loss_ratio_23d,
+  round(
+    sum(
+      case
+        when flag_comportamiento_pago=1 then crd_credit_amount
+        else 0
+      end
+    )/sum(crd_credit_amount)*100.00,
+    2
+  ) as bhv_pago
+from
+  SBOX_CREDITS_SB.Base_Vintage_Flags 
+  where FLAG_RATING_CHURN is not null
+group by
+  1, 2
+having
+  bhv_pago>50
+order by
+  1, 2;
+
+
+create or replace table
+ SBOX_CREDITS_SB.base_vintage_capeados_churn as
+select
+  mes_orig,
+  FLAG_RATING_CHURN,
+  FLAG_TIPO_OFERTA,
+  max(cap) as CAP,
+  sum(flag_cap) as cantidad_capeados,
+  (sum(flag_cap)/count(*)) as porcentaje_Capeados,
+  COUNT(*) AS CANTIDAD,
+  cast(sum(crd_credit_amount) as bigint) as monto_originado,
+  round(avg(plazo),2) as plazo_promedio,
+  round(avg(tna),2) as tasa_promedio,
+  approx_quantiles(crd_credit_amount, 100)[offset(50)]  as mediana_monto,
+  approx_quantiles(crd_credit_amount, 100)[offset(25)]  as monto_perct_25,
+  approx_quantiles(crd_credit_amount, 100)[offset(75)]  as monto_perct_75,
+  approx_quantiles(crd_credit_amount, 100)[offset(90)]  as monto_perct_90,
+  approx_quantiles(crd_credit_amount, 100)[offset(99)]  as monto_perct_99,
+  approx_quantiles(CRD_PROP_TOTAL_AMOUNT, 100)[offset(50)]  as mediana_propuesta,
+  approx_quantiles(CRD_PROP_TOTAL_AMOUNT, 100)[offset(25)]  as propuesta_perct_25,
+  approx_quantiles(CRD_PROP_TOTAL_AMOUNT, 100)[offset(75)]  as propuesta_perct_75,
+  approx_quantiles(CRD_PROP_TOTAL_AMOUNT, 100)[offset(90)]  as propuesta_perct_90,
+  approx_quantiles(CRD_PROP_TOTAL_AMOUNT, 100)[offset(99)]  as propuesta_perct_99,
+  cast(
+    sum(
+      case
+        when flag_comportamiento_pago=1 then default_hoy_amount+FUNDING_COST+OTHER_COGS
+        else 0
+      end
+    )/sum(
+      case
+        when flag_comportamiento_pago=1 then crd_credit_hoy_revenues
+        else null
+      end
+    )*100.00 as integer
+  ) as loss_ratio_hoy,
+  cast(
+    sum(
+      case
+        when flag_comportamiento_pago=1 then fpd_amount+FUNDING_COST+OTHER_COGS
+        else 0
+      end
+    )/sum(
+      case
+        when flag_comportamiento_pago=1 then crd_credit_revenues
+        else null
+      end
+    )*100.00 as integer
+  ) as loss_ratio_23d,
+  round(
+    sum(
+      case
+        when flag_comportamiento_pago=1 then crd_credit_amount
+        else 0
+      end
+    )/sum(crd_credit_amount)*100.00,
+    2
+  ) as bhv_pago
+from
+  SBOX_CREDITS_SB.Base_Vintage_Flags 
+  where FLAG_RATING_CHURN is not null
+group by
+  1, 2,3
+having
+  bhv_pago>50
+order by
+  1, 2,3;
+
+create or replace table
+ SBOX_CREDITS_SB.base_vintage_capeados_tpv as
+select
+  mes_orig,
+  TPV_SEGMENT,
+  max(cap) as CAP,
+  sum(flag_cap) as cantidad_capeados,
+  (sum(flag_cap)/count(*)) as porcentaje_Capeados,
+  COUNT(*) AS CANTIDAD,
+  cast(sum(crd_credit_amount) as bigint) as monto_originado,
+  round(avg(plazo),2) as plazo_promedio,
+  round(avg(tna),2) as tasa_promedio,
+  approx_quantiles(crd_credit_amount, 100)[offset(50)]  as mediana_monto,
+  approx_quantiles(crd_credit_amount, 100)[offset(25)]  as monto_perct_25,
+  approx_quantiles(crd_credit_amount, 100)[offset(75)]  as monto_perct_75,
+  approx_quantiles(crd_credit_amount, 100)[offset(90)]  as monto_perct_90,
+  approx_quantiles(crd_credit_amount, 100)[offset(99)]  as monto_perct_99,
+  approx_quantiles(CRD_PROP_TOTAL_AMOUNT, 100)[offset(50)]  as mediana_propuesta,
+  approx_quantiles(CRD_PROP_TOTAL_AMOUNT, 100)[offset(25)]  as propuesta_perct_25,
+  approx_quantiles(CRD_PROP_TOTAL_AMOUNT, 100)[offset(75)]  as propuesta_perct_75,
+  approx_quantiles(CRD_PROP_TOTAL_AMOUNT, 100)[offset(90)]  as propuesta_perct_90,
+  approx_quantiles(CRD_PROP_TOTAL_AMOUNT, 100)[offset(99)]  as propuesta_perct_99,
+  cast(
+    sum(
+      case
+        when flag_comportamiento_pago=1 then default_hoy_amount+FUNDING_COST+OTHER_COGS
+        else 0
+      end
+    )/sum(
+      case
+        when flag_comportamiento_pago=1 then crd_credit_hoy_revenues
+        else null
+      end
+    )*100.00 as integer
+  ) as loss_ratio_hoy,
+  cast(
+    sum(
+      case
+        when flag_comportamiento_pago=1 then fpd_amount+FUNDING_COST+OTHER_COGS
+        else 0
+      end
+    )/sum(
+      case
+        when flag_comportamiento_pago=1 then crd_credit_revenues
+        else null
+      end
+    )*100.00 as integer
+  ) as loss_ratio_23d,
+  round(
+    sum(
+      case
+        when flag_comportamiento_pago=1 then crd_credit_amount
+        else 0
+      end
+    )/sum(crd_credit_amount)*100.00,
+    2
+  ) as bhv_pago
+from
+  SBOX_CREDITS_SB.Base_Vintage_Flags 
+  where FLAG_RATING_CHURN is not null
+group by
+  1, 2
+having
+  bhv_pago>50
+order by
+  1, 2;
+
+
+
+
+---------------------------------------------;
+----------- Funciones AUXILIARES -------
+---------------------------------------------
+-- crea variable año-mes.
+CREATE OR REPLACE FUNCTION SBOX_CREDITS_SB.FECHA_PARSE (col_date TIMESTAMP) RETURNS INT64 AS (
+  EXTRACT(
+    YEAR
+    FROM
+      CAST(col_date AS TIMESTAMP)
+  )*100+EXTRACT(
+    MONTH
+    FROM
+      CAST(col_date AS TIMESTAMP)
+  )
+);
+ 

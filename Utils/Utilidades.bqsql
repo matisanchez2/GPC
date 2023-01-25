@@ -1,0 +1,12 @@
+--- Fechas Periodicas
+SELECT DISTINCT
+    AUD_INS_DT,
+    CAST(AUD_INS_DT AS DATE) AS fecha
+FROM
+    `meli-bi-data.SBOX_IT_CREDITS_CREDITSTBL.MC_JARVIS_HIST`
+WHERE
+    tipo_loggeo="PERIODICO"
+    AND SIT_SITE_ID="MLM"
+    AND CAST(AUD_INS_DT AS DATE)>"2022-01-01"
+ORDER BY
+    fecha DESC;
