@@ -1,0 +1,157 @@
+----------------------------------------------------
+----- CÓDIGO VINTAGE - DINERO EXPRESS  MLM ---------
+----------------------------------------------------
+-- Filtro de Jarvis Hist, el objetivo es eliminar duplicados de encendido. 
+-- esto es si se replico jarvis hist 2 veces el mismo mes, se queda con la 
+-- primera observación. 
+
+CREATE OR REPLACE TABLE
+  SBOX_CREDITS_SB.FECHAS_ENCENDIDO_VALIDAS_VINTAGE_DE_MLM AS WITH
+  FECHAS_ENCENDIDOS AS (
+    SELECT DISTINCT
+      AUD_INS_DT,
+      SBOX_CREDITS_SB.FECHA_PARSE (AUD_INS_DT) AS mes_encendido,
+    FROM
+      `meli-bi-data.SBOX_IT_CREDITS_CREDITSTBL.MC_JARVIS_HIST`
+    WHERE
+      tipo_loggeo="PERIODICO"
+      AND SIT_SITE_ID="MLM"
+      AND CAST(AUD_INS_DT AS DATE)>"2022-01-01"
+  ),
+  fechas_encendidos_2 AS (
+    SELECT
+      AUD_INS_DT,
+      mes_encendido,
+      ROW_NUMBER() OVER (
+        PARTITION BY
+          mes_encendido
+        ORDER BY
+          AUD_INS_DT
+      ) AS repeticiones
+    FROM
+      fechas_encendidos
+  )
+SELECT
+  *
+FROM
+  fechas_encendidos_2
+WHERE
+  repeticiones=1;
+
+
+CREATE OR REPLACE TABLE
+  SBOX_CREDITS_SB.JHIST_REDUCIDAD AS
+SELECT
+  A.* EXCEPT (EMAIL,CUS_PHONE),
+  B.mes_encendido
+FROM
+  `meli-bi-data.SBOX_IT_CREDITS_CREDITSTBL.MC_JARVIS_HIST` AS A
+  INNER JOIN SBOX_CREDITS_SB.Fechas_encendido_validas_vintage_DE_MLM AS B ON A.AUD_INS_DT=B.AUD_INS_DT;
+
+
+CREATE OR REPLACE TABLE
+  SBOX_CREDITS_SB.Base_Vintage_MLM_Pura AS
+SELECT
+  A.*,
+  SBOX_CREDITS_SB.FECHA_PARSE_to_string(cast(A.crd_credit_creation_date_id as timestamp))as Mes_orig_parsed,
+  B.tag_oferta,
+  B.TAG_TPV_SEGMENT_L3M,
+  B.MONTHLY_TPV_LC,
+  B.TAG_TPV_SEGMENT_M1,
+  B.RATING_CHURN,
+  B.TAG_TIPO_BORROWER_DE,
+  B.TAG_POINT,
+  B.TAG_OFERTA_DE,
+  B.TPV_LC_M1,
+  B.ACTIVITY,
+  B.FLAG_DE,
+  C.CRD_PROP_TOTAL_AMOUNT  
+FROM
+  SBOX_CREDITS_SB.Base_Vintage_MLM_DE AS A
+  LEFT JOIN SBOX_CREDITS_SB.Jhist_reducidad AS B ON a.cus_cust_id_borrower=b.CUS_CUST_ID_SEL
+  AND B.mes_encendido=A.mes_orig
+  LEFT JOIN  `meli-bi-data.SBOX_IT_CREDITS_CREDITSTBL.BASE_MC_CRED`  AS C
+   ON A.CRD_CREDIT_ID=C.CRD_CREDIT_ID
+  -- se decidio hacer períodico para ser consistente en el análisis
+WHERE
+  1=1
+  AND tipo_loggeo="PERIODICO"
+  AND B.SIT_SITE_ID="MLM"
+  -- filtro fecha para hacer más eficiente la query
+  AND CAST(B.AUD_INS_DT AS DATE)>="2021-12-01"
+  AND CAST(A.crd_credit_creation_date_id AS DATE)>="2022-01-01";
+
+--- PARMETRICAS - última validación 26 de Enero Habrá que meter 
+--- en un futuro una tabla con mes_id.
+CREATE OR REPLACE TABLE SBOX_CREDITS_SB.caps_parametricos as
+select 
+  CRD_CREDIT_ID,
+  Case
+   WHEN 
+      FLAG_INSTORE="1" then 150000
+    WHEN  
+      (TAG_OFERTA="NO OFERTABLE" or TAG_OFERTA="EARLY OFFER") then 300000
+    WHEN
+      FLAG_INSTORE="0" and TAG_OFERTA in
+       ("NO OFERTABLE" ,"EARLY OFFER") and rating_churn in ("F","D","E","G")then 300000
+    else 750000 end as cap
+ from SBOX_CREDITS_SB.Base_Vintage_MLM_Pura;
+
+
+--- TABLA FINAL CON FLAGS
+CREATE OR REPLACE TABLE
+  SBOX_CREDITS_SB.Base_Vintage_Flags AS
+SELECT
+    MES_ORIG,
+     Mes_orig_parsed,
+    a.CRD_CREDIT_ID,
+    CRD_CREDIT_AMOUNT,
+    CRD_PROP_TOTAL_AMOUNT,
+    FLAG_COMPORTAMIENTO_PAGO,
+    DEFAULT_HOY_AMOUNT,
+    FUNDING_COST,
+    OTHER_COGS,
+    FPD_AMOUNT,
+    CRD_CREDIT_HOY_REVENUES,
+    CRD_CREDIT_REVENUES,
+    FLAG_INSTORE,
+    case when abs(CRD_CREDIT_AMOUNT-CRD_PROP_TOTAL_AMOUNT)<10
+    then "Topeado"
+    else "No Topeado"end as FLAG_TOPEADO,
+    b.cap,
+    case when abs(cap-CRD_PROP_TOTAL_AMOUNT)<50 then 1  else 0 end AS Flag_cap,
+    ---nuevos testear 
+    DIAS_ATRASO,
+    PLAZO,
+    TNA,
+    TAG_OFERTA_DE AS FLAG_OFERTA,
+    TAG_POINT AS FLAG_POINT, -- QR, POINT, POINT PRO
+    TAG_TIPO_BORROWER_DE AS FLAG_TIPO_BORROWER, -- OLD, NEW, NEW2L
+    RATING_CHURN AS FLAG_RATING_CHURN, -- A,B,C..
+    COUNT(*) OVER (partition by a.mes_orig ) AS Total_Originaciones_Mensuales,
+    Case 
+      WHEN (MONTHLY_TPV_LC=0 OR MONTHLY_TPV_LC IS NULL) AND TPV_LC_M1 IS NULL THEN '0.NULL'
+      WHEN MONTHLY_TPV_LC>0 AND MONTHLY_TPV_LC<5001 THEN '1.LOLOS'
+      WHEN (MONTHLY_TPV_LC=0 OR MONTHLY_TPV_LC IS NULL) AND TPV_LC_M1<5001 THEN '1.LOLOS'
+      WHEN MONTHLY_TPV_LC>0 AND MONTHLY_TPV_LC<30001 THEN '2.MILOS'
+      WHEN (MONTHLY_TPV_LC=0 OR MONTHLY_TPV_LC IS NULL) AND TPV_LC_M1<30001 THEN '2.MILOS'
+      WHEN MONTHLY_TPV_LC>0 AND MONTHLY_TPV_LC<100001 THEN '3.HILOS'
+      WHEN (MONTHLY_TPV_LC=0 OR MONTHLY_TPV_LC IS NULL) AND TPV_LC_M1<100001 THEN '3.HILOS'
+      WHEN MONTHLY_TPV_LC>0 AND MONTHLY_TPV_LC<2000001 THEN '4.SMBs'
+      WHEN (MONTHLY_TPV_LC=0 OR MONTHLY_TPV_LC IS NULL) AND TPV_LC_M1<2000001 THEN '4.SMBs'
+      WHEN MONTHLY_TPV_LC>0 AND MONTHLY_TPV_LC>=2000001 THEN '5.BIG_SELLERS'
+      WHEN (MONTHLY_TPV_LC=0 OR MONTHLY_TPV_LC IS NULL) AND TPV_LC_M1>=2000001 THEN '5.BIG_SELLERS'
+      END as TPV_SEGMENT,
+    CASE
+        WHEN TAG_OFERTA="NO OFERTABLE" THEN "EARLY OFFER"
+        ELSE TAG_OFERTA
+      END AS FLAG_TIPO_OFERTA, --Full offer , early offfer, no ofertable
+    CASE
+      WHEN UPPER(CRD_PRODUCT_ID) IN ('BABY_EXPRESS_POINT_MLM_1') THEN 1
+      ELSE 0
+      END AS FLAG_BABY_DE,
+  FROM
+    SBOX_CREDITS_SB.Base_Vintage_MLM_Pura as a 
+      left join SBOX_CREDITS_SB.caps_parametricos b 
+      on a.crd_credit_id=b.crd_credit_id
+  where crd_credit_creation_date_id>="2022-04-01";  --- Este filtro es porque no calculamos el loss ratio para anates.
